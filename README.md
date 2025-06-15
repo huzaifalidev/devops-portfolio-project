@@ -289,9 +289,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 👤 Author
 
 **Huzaifa Ali**
-- Website: [me.huzaifali.tech](https://me.huzaifali.tech/)
-- GitHub: [@huzaifali](https://github.com/huzaifali)
-- LinkedIn: [huzaifali](https://linkedin.com/in/huzaifali)
+- Portfolio: [me.huzaifali.tech](https://huzaifali.tech/)
+- GitHub: [@huzaifali](https://github.com/huzaifalidev)
+- LinkedIn: [huzaifali](https://linkedin.com/in/huzaifali48)
 
 ## 🙏 Acknowledgments
 
