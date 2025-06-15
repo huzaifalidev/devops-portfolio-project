@@ -1,26 +1,36 @@
 ---
-- name: Install Node.js and deploy Next.js application
+- name: Install and configure Next.js application
   hosts: webservers
   become: yes
   vars:
     app_dir: /var/www/nextjs
-    node_version: "18.x"
-
+    node_version: "18"
+    
   tasks:
     - name: Update apt cache
       apt:
         update_cache: yes
+        cache_valid_time: 3600
 
-    - name: Install curl and software-properties-common
+    - name: Install curl and other dependencies
       apt:
         name:
           - curl
           - software-properties-common
-          - git
+          - gnupg
+          - build-essential
         state: present
 
-    - name: Add Node.js repository
-      shell: curl -fsSL https://deb.nodesource.com/setup_{{ node_version }} | sudo -E bash -
+    - name: Add NodeSource GPG key
+      apt_key:
+        url: https://deb.nodesource.com/gpgkey/nodesource.gpg.key
+        state: present
+
+    - name: Add NodeSource repository
+      apt_repository:
+        repo: "deb https://deb.nodesource.com/node_{{ node_version }}.x {{ ansible_distribution_release }} main"
+        state: present
+        update_cache: yes
 
     - name: Install Node.js
       apt:
@@ -31,6 +41,7 @@
       npm:
         name: pm2
         global: yes
+        state: present
 
     - name: Create application directory
       file:
@@ -38,39 +49,149 @@
         state: directory
         mode: '0755'
 
-    - name: Copy Next.js application files
+    - name: Copy Next.js root configuration files
       copy:
         src: "{{ item }}"
-        dest: "{{ app_dir }}/"
+        dest: "{{ app_dir }}/{{ item | basename }}"
         mode: '0644'
       with_fileglob:
-        - "../app/*"
+        - "../app/.gitignore"
+        - "../app/components.json"
+        - "../app/next-env.d.ts"
+        - "../app/next.config.mjs"
+        - "../app/package-lock.json"
+        - "../app/package.json"
+        - "../app/pnpm-lock.yaml"
+        - "../app/postcss.config.mjs"
+        - "../app/tailwind.config.ts"
+        - "../app/tsconfig.json"
+      failed_when: false
 
-    - name: Copy pages directory
+    - name: Copy app directory (Next.js App Router)
       copy:
-        src: "../app/pages"
-        dest: "{{ app_dir }}/"
+        src: "../app/app/"
+        dest: "{{ app_dir }}/app/"
         mode: '0644'
 
-    - name: Install dependencies
+    - name: Copy components directory
+      copy:
+        src: "../app/components/"
+        dest: "{{ app_dir }}/components/"
+        mode: '0644'
+
+    - name: Copy hooks directory
+      copy:
+        src: "../app/hooks/"
+        dest: "{{ app_dir }}/hooks/"
+        mode: '0644'
+
+    - name: Copy lib directory
+      copy:
+        src: "../app/lib/"
+        dest: "{{ app_dir }}/lib/"
+        mode: '0644'
+
+    - name: Copy public directory
+      copy:
+        src: "../app/public/"
+        dest: "{{ app_dir }}/public/"
+        mode: '0644'
+
+    - name: Copy styles directory
+      copy:
+        src: "../app/styles/"
+        dest: "{{ app_dir }}/styles/"
+        mode: '0644'
+
+    - name: Set ownership of application directory
+      file:
+        path: "{{ app_dir }}"
+        owner: azureuser
+        group: azureuser
+        recurse: yes
+
+    - name: Install npm dependencies
       npm:
         path: "{{ app_dir }}"
+        state: present
+      become_user: azureuser
+      register: npm_install
+      retries: 3
+      delay: 10
 
     - name: Build Next.js application
-      shell: npm run build
+      command: npm run build
       args:
         chdir: "{{ app_dir }}"
+      become_user: azureuser
+      register: build_result
+      failed_when: build_result.rc != 0
+      retries: 2
+      delay: 5
+
+    - name: Create PM2 ecosystem file
+      copy:
+        content: |
+          module.exports = {
+            apps: [{
+              name: 'nextjs-app',
+              script: 'npm',
+              args: 'start',
+              cwd: '{{ app_dir }}',
+              instances: 1,
+              autorestart: true,
+              watch: false,
+              max_memory_restart: '1G',
+              env: {
+                NODE_ENV: 'production',
+                PORT: 3000
+              }
+            }]
+          }
+        dest: "{{ app_dir }}/ecosystem.config.js"
+        owner: azureuser
+        group: azureuser
+        mode: '0644'
 
     - name: Stop existing PM2 processes
-      shell: pm2 stop all || true
+      command: pm2 delete all
+      become_user: azureuser
+      failed_when: false
 
-    - name: Start Next.js with PM2
-      shell: pm2 start npm --name "nextjs-app" -- start
+    - name: Start Next.js application with PM2
+      command: pm2 start ecosystem.config.js
       args:
         chdir: "{{ app_dir }}"
+      become_user: azureuser
 
     - name: Save PM2 configuration
-      shell: pm2 save
+      command: pm2 save
+      become_user: azureuser
 
-    - name: Setup PM2 startup
-      shell: pm2 startup systemd -u root --hp /root
+    - name: Enable PM2 startup
+      command: pm2 startup
+      become_user: azureuser
+      register: pm2_startup
+      failed_when: false
+
+    - name: Execute PM2 startup command
+      shell: "{{ pm2_startup.stdout_lines[-1] }}"
+      when: pm2_startup.stdout_lines is defined and pm2_startup.stdout_lines | length > 0
+      failed_when: false
+
+    - name: Configure firewall for port 3000
+      ufw:
+        rule: allow
+        port: '3000'
+        proto: tcp
+      failed_when: false
+
+    - name: Display application status
+      debug:
+        msg: |
+          Next.js application has been deployed successfully!
+          - Application directory: {{ app_dir }}
+          - Application URL: http://{{ ansible_host }}:3000
+          - PM2 process name: nextjs-app
+          - Check status with: pm2 status
+          - View logs with: pm2 logs nextjs-app
