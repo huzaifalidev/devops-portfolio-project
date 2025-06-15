@@ -110,20 +110,33 @@
         group: azureuser
         recurse: yes
 
-    - name: Install npm dependencies
-      npm:
-        path: "{{ app_dir }}"
-        state: present
+    # UPDATED: Install npm dependencies with --legacy-peer-deps flag
+    - name: Install npm dependencies with legacy peer deps
+      shell: |
+        cd {{ app_dir }}
+        npm install --legacy-peer-deps
       become_user: azureuser
-      register: npm_install
+      environment:
+        HOME: /home/azureuser
+        PATH: "/usr/bin:/bin:/usr/local/bin"
+      register: npm_install_result
       retries: 3
       delay: 10
+      failed_when: npm_install_result.rc != 0
+
+    - name: Display npm install output
+      debug:
+        var: npm_install_result.stdout
+      when: npm_install_result.stdout is defined
 
     - name: Build Next.js application
       command: npm run build
       args:
         chdir: "{{ app_dir }}"
       become_user: azureuser
+      environment:
+        HOME: /home/azureuser
+        PATH: "/usr/bin:/bin:/usr/local/bin"
       register: build_result
       failed_when: build_result.rc != 0
       retries: 2
@@ -156,6 +169,9 @@
     - name: Stop existing PM2 processes
       command: pm2 delete all
       become_user: azureuser
+      environment:
+        HOME: /home/azureuser
+        PATH: "/usr/bin:/bin:/usr/local/bin"
       failed_when: false
 
     - name: Start Next.js application with PM2
@@ -163,14 +179,23 @@
       args:
         chdir: "{{ app_dir }}"
       become_user: azureuser
+      environment:
+        HOME: /home/azureuser
+        PATH: "/usr/bin:/bin:/usr/local/bin"
 
     - name: Save PM2 configuration
       command: pm2 save
       become_user: azureuser
+      environment:
+        HOME: /home/azureuser
+        PATH: "/usr/bin:/bin:/usr/local/bin"
 
     - name: Enable PM2 startup
       command: pm2 startup
       become_user: azureuser
+      environment:
+        HOME: /home/azureuser
+        PATH: "/usr/bin:/bin:/usr/local/bin"
       register: pm2_startup
       failed_when: false
 
