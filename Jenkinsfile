@@ -109,35 +109,90 @@ pipeline {
             steps {
                 echo '⏳ Waiting for VM to fully initialize...'
                 script {
-                    // Get public IP
+                    // Get public IP with better error handling
                     def publicIP = ""
                     dir('terraform') {
+                        // First verify terraform state exists
+                        sh 'terraform state list'
+                        
+                        // Get public IP with validation
                         publicIP = sh(
-                            script: "terraform output -raw public_ip_address",
+                            script: '''
+                                # Check if output exists
+                                terraform output | grep -q "public_ip_address" || {
+                                    echo "ERROR: public_ip_address output not found"
+                                    terraform output
+                                    exit 1
+                                }
+                                
+                                # Get the IP address
+                                IP=$(terraform output -raw public_ip_address 2>/dev/null)
+                                
+                                # Validate IP format
+                                if [[ -z "$IP" || "$IP" == "null" ]]; then
+                                    echo "ERROR: Empty or null IP address"
+                                    exit 1
+                                fi
+                                
+                                # Basic IP validation
+                                if [[ ! "$IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                                    echo "ERROR: Invalid IP format: $IP"
+                                    exit 1
+                                fi
+                                
+                                echo "$IP"
+                            ''',
                             returnStdout: true
                         ).trim()
                     }
                     
+                    if (!publicIP || publicIP == "" || publicIP == "null") {
+                        error "Failed to retrieve valid public IP address from Terraform output"
+                    }
+                    
                     echo "VM Public IP: ${publicIP}"
                     
-                    // Wait for SSH service to be ready
+                    // Store IP in environment for other stages
+                    env.VM_PUBLIC_IP = publicIP
+                    
+                    // Wait for SSH service to be ready with improved error handling
                     echo "Waiting for SSH service to be ready..."
                     def sshReady = false
                     def maxAttempts = 20
                     
                     for (int i = 1; i <= maxAttempts; i++) {
                         try {
-                            sh "timeout 10 nc -zv ${publicIP} 22"
+                            sh """
+                                echo "Testing SSH connectivity to ${publicIP}:22 (attempt ${i}/${maxAttempts})"
+                                timeout 10 nc -zv ${publicIP} 22 2>&1 || {
+                                    echo "nc command failed for ${publicIP}:22"
+                                    exit 1
+                                }
+                            """
                             sshReady = true
                             echo "✅ SSH service is ready after ${i} attempts"
                             break
                         } catch (Exception e) {
-                            echo "SSH attempt ${i}/${maxAttempts} failed, waiting 15 seconds..."
-                            sleep 15
+                            echo "SSH attempt ${i}/${maxAttempts} failed: ${e.getMessage()}"
+                            if (i < maxAttempts) {
+                                echo "Waiting 15 seconds before next attempt..."
+                                sleep 15
+                            }
                         }
                     }
                     
                     if (!sshReady) {
+                        // Additional debugging before failing
+                        sh """
+                            echo "=== DEBUGGING SSH CONNECTIVITY ==="
+                            echo "Target IP: ${publicIP}"
+                            echo "Testing basic connectivity:"
+                            ping -c 3 ${publicIP} || echo "Ping failed"
+                            echo "Testing port 22 with telnet:"
+                            timeout 5 telnet ${publicIP} 22 || echo "Telnet to port 22 failed"
+                            echo "Checking Azure VM status via Azure CLI:"
+                            az vm list-ip-addresses --output table || echo "Failed to list VM IPs"
+                        """
                         error "SSH service not ready after ${maxAttempts} attempts"
                     }
                     
@@ -152,13 +207,13 @@ pipeline {
             steps {
                 echo '🔍 Testing SSH connection...'
                 script {
-                    def publicIP = ""
-                    dir('terraform') {
-                        publicIP = sh(
-                            script: "terraform output -raw public_ip_address",
-                            returnStdout: true
-                        ).trim()
+                    def publicIP = env.VM_PUBLIC_IP
+                    
+                    if (!publicIP) {
+                        error "Public IP not available from previous stage"
                     }
+                    
+                    echo "Testing SSH connection to: ${publicIP}"
                     
                     // Test SSH connection with proper error handling
                     def sshWorking = false
@@ -167,28 +222,34 @@ pipeline {
                     for (int i = 1; i <= maxAttempts; i++) {
                         try {
                             sh """
+                                echo "SSH attempt ${i}/${maxAttempts} to ${publicIP}"
                                 ssh -i "${SSH_KEY_PATH}" \
                                     -o StrictHostKeyChecking=no \
                                     -o UserKnownHostsFile=/dev/null \
                                     -o ConnectTimeout=30 \
                                     -o BatchMode=yes \
                                     -o LogLevel=ERROR \
-                                    azureuser@${publicIP} 'echo "SSH connection successful!"'
+                                    azureuser@${publicIP} 'echo "SSH connection successful! Hostname: \$(hostname)"'
                             """
                             sshWorking = true
                             echo "✅ SSH connection established after ${i} attempts"
                             break
                         } catch (Exception e) {
-                            echo "SSH test attempt ${i}/${maxAttempts} failed"
+                            echo "SSH test attempt ${i}/${maxAttempts} failed: ${e.getMessage()}"
                             if (i == maxAttempts) {
                                 // Show verbose output for debugging
                                 sh """
-                                    echo "Final SSH attempt with verbose output:"
+                                    echo "=== FINAL SSH DEBUG OUTPUT ==="
+                                    echo "SSH Key permissions:"
+                                    ls -la "${SSH_KEY_PATH}"
+                                    echo "SSH Key format check:"
+                                    head -1 "${SSH_KEY_PATH}"
+                                    echo "Attempting SSH with verbose output:"
                                     ssh -i "${SSH_KEY_PATH}" \
                                         -o StrictHostKeyChecking=no \
                                         -o UserKnownHostsFile=/dev/null \
                                         -o ConnectTimeout=30 \
-                                        -vvv azureuser@${publicIP} 'echo "test"' 2>&1 | head -20 || true
+                                        -vvv azureuser@${publicIP} 'echo "test"' 2>&1 | head -30 || true
                                 """
                                 error "SSH connection failed after ${maxAttempts} attempts"
                             } else {
@@ -202,27 +263,26 @@ pipeline {
 
         stage('Generate Ansible Inventory') {
             steps {
-                dir('terraform') {
-                    echo '🧾 Creating Ansible inventory file...'
-                    script {
-                        def publicIP = sh(
-                            script: "terraform output -raw public_ip_address",
-                            returnStdout: true
-                        ).trim()
+                echo '🧾 Creating Ansible inventory file...'
+                script {
+                    def publicIP = env.VM_PUBLIC_IP
+                    
+                    if (!publicIP) {
+                        error "Public IP not available"
+                    }
 
-                        echo "Public IP: ${publicIP}"
-                        sh 'mkdir -p ../ansible'
+                    echo "Creating Ansible inventory for IP: ${publicIP}"
+                    sh 'mkdir -p ansible'
 
-                        writeFile file: '../ansible/inventory', text: """[webservers]
+                    writeFile file: 'ansible/inventory', text: """[webservers]
 ${publicIP} ansible_user=azureuser ansible_ssh_private_key_file=${SSH_KEY_PATH} ansible_host_key_checking=false ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30'
 
 [all:vars]
 ansible_python_interpreter=/usr/bin/python3
 """
 
-                        echo "Inventory file created:"
-                        sh 'cat ../ansible/inventory'
-                    }
+                    echo "Inventory file created:"
+                    sh 'cat ansible/inventory'
                 }
             }
         }
@@ -246,11 +306,13 @@ ansible_python_interpreter=/usr/bin/python3
                 dir('ansible') {
                     echo '🛠️ Installing Node.js and deploying Next.js app via Ansible...'
                     script {
-                        sh 'echo "Files in ansible directory:"'
-                        sh 'ls -la'
-                        sh 'echo "Files in app directory:"'
-                        sh 'ls -la ../app/'
-                        sh 'ansible-playbook -i inventory install_web.yml -v --timeout=600'
+                        sh '''
+                            echo "Files in ansible directory:"
+                            ls -la
+                            echo "Files in app directory:"
+                            ls -la ../app/ || echo "App directory not found"
+                            ansible-playbook -i inventory install_web.yml -v --timeout=600
+                        '''
                     }
                 }
             }
@@ -258,43 +320,42 @@ ansible_python_interpreter=/usr/bin/python3
         
         stage('Verify Next.js Deployment') {
             steps {
-                dir('terraform') {
-                    script {
-                        def publicIP = sh(
-                            script: "terraform output -raw public_ip_address",
-                            returnStdout: true
-                        ).trim()
+                script {
+                    def publicIP = env.VM_PUBLIC_IP
+                    
+                    if (!publicIP) {
+                        error "Public IP not available"
+                    }
 
-                        echo "🌐 Verifying Next.js app at http://${publicIP}:3000"
-                        echo "Waiting for Next.js server to start..."
-                        sleep time: 60, unit: 'SECONDS'
+                    echo "🌐 Verifying Next.js app at http://${publicIP}:3000"
+                    echo "Waiting for Next.js server to start..."
+                    sleep time: 60, unit: 'SECONDS'
 
-                        retry(15) {
-                            script {
-                                try {
-                                    sh """
-                                        echo "Testing connection to http://${publicIP}:3000"
-                                        curl -fs --connect-timeout 15 --max-time 30 http://${publicIP}:3000 > /dev/null
-                                        echo '✅ Next.js app is reachable!'
-                                    """
-                                } catch (Exception e) {
-                                    echo "❌ Next.js app not reachable yet, retrying in 15 seconds..."
-                                    sleep time: 15, unit: 'SECONDS'
-                                    throw e
-                                }
+                    retry(15) {
+                        script {
+                            try {
+                                sh """
+                                    echo "Testing connection to http://${publicIP}:3000"
+                                    curl -fs --connect-timeout 15 --max-time 30 http://${publicIP}:3000 > /dev/null
+                                    echo '✅ Next.js app is reachable!'
+                                """
+                            } catch (Exception e) {
+                                echo "❌ Next.js app not reachable yet, retrying in 15 seconds..."
+                                sleep time: 15, unit: 'SECONDS'
+                                throw e
                             }
                         }
-
-                        sh """
-                            echo "📄 Next.js app preview:"
-                            curl -s --connect-timeout 15 --max-time 30 http://${publicIP}:3000 | head -30
-                        """
-
-                        writeFile file: 'deployment_url.txt', text: "http://${publicIP}:3000"
-                        archiveArtifacts artifacts: 'deployment_url.txt', fingerprint: true
-
-                        echo "🎉 Next.js application successfully deployed at: http://${publicIP}:3000"
                     }
+
+                    sh """
+                        echo "📄 Next.js app preview:"
+                        curl -s --connect-timeout 15 --max-time 30 http://${publicIP}:3000 | head -30
+                    """
+
+                    writeFile file: 'deployment_url.txt', text: "http://${publicIP}:3000"
+                    archiveArtifacts artifacts: 'deployment_url.txt', fingerprint: true
+
+                    echo "🎉 Next.js application successfully deployed at: http://${publicIP}:3000"
                 }
             }
         }
@@ -307,8 +368,8 @@ ansible_python_interpreter=/usr/bin/python3
         }
         success {
             script {
-                if (fileExists('terraform/deployment_url.txt')) {
-                    def url = readFile('terraform/deployment_url.txt').trim()
+                if (fileExists('deployment_url.txt')) {
+                    def url = readFile('deployment_url.txt').trim()
                     echo """
 ✅ NEXT.JS DEPLOYMENT SUCCESSFUL!
 🚀 URL: ${url}
@@ -336,6 +397,7 @@ Common solutions:
 4. VM Startup: Increase wait times for VM to fully boot
 5. Node.js Build: Check if Next.js build process completed successfully
 6. PM2 Process: Verify PM2 is managing the Next.js process correctly
+7. Terraform Output: Ensure public_ip_address output is properly defined
             '''
         }
         cleanup {
