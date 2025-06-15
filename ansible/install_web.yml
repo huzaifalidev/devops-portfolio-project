@@ -1,0 +1,76 @@
+---
+- name: Install Node.js and deploy Next.js application
+  hosts: webservers
+  become: yes
+  vars:
+    app_dir: /var/www/nextjs
+    node_version: "18.x"
+
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install curl and software-properties-common
+      apt:
+        name:
+          - curl
+          - software-properties-common
+          - git
+        state: present
+
+    - name: Add Node.js repository
+      shell: curl -fsSL https://deb.nodesource.com/setup_{{ node_version }} | sudo -E bash -
+
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+
+    - name: Install PM2 globally
+      npm:
+        name: pm2
+        global: yes
+
+    - name: Create application directory
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Copy Next.js application files
+      copy:
+        src: "{{ item }}"
+        dest: "{{ app_dir }}/"
+        mode: '0644'
+      with_fileglob:
+        - "../app/*"
+
+    - name: Copy pages directory
+      copy:
+        src: "../app/pages"
+        dest: "{{ app_dir }}/"
+        mode: '0644'
+
+    - name: Install dependencies
+      npm:
+        path: "{{ app_dir }}"
+
+    - name: Build Next.js application
+      shell: npm run build
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Stop existing PM2 processes
+      shell: pm2 stop all || true
+
+    - name: Start Next.js with PM2
+      shell: pm2 start npm --name "nextjs-app" -- start
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Save PM2 configuration
+      shell: pm2 save
+
+    - name: Setup PM2 startup
+      shell: pm2 startup systemd -u root --hp /root
