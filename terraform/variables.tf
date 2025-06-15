@@ -1,19 +1,19 @@
 variable "resource_group_name" {
-  description = "Name of the resource group"
+  description = "Name of the Azure Resource Group"
   type        = string
-  default     = "rg-devops-pipeline"
+  default     = "rg-nextjs-devops"
 }
 
 variable "location" {
-  description = "Azure region"
+  description = "Azure region where resources will be deployed"
   type        = string
   default     = "East US"
 }
 
 variable "prefix" {
-  description = "Prefix for all resources"
+  description = "Prefix for all resource names"
   type        = string
-  default     = "devops-pipeline"
+  default     = "nextjs-demo"
 }
 
 variable "vm_size" {
@@ -23,12 +23,12 @@ variable "vm_size" {
 }
 
 variable "admin_username" {
-  description = "Admin username for the VM"
+  description = "Admin username for the virtual machine"
   type        = string
   default     = "azureuser"
 }
 
 variable "ssh_public_key" {
-  description = "SSH public key content"
+  description = "SSH public key for accessing the virtual machine"
   type        = string
 }
