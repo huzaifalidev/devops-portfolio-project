@@ -134,8 +134,8 @@ pipeline {
                                     exit 1
                                 fi
                                 
-                                # Basic IP validation
-                                if [[ ! "$IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                                # Basic IP validation - Fixed regex pattern
+                                if [[ ! "$IP" =~ ^[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}$ ]]; then
                                     echo "ERROR: Invalid IP format: $IP"
                                     exit 1
                                 fi
